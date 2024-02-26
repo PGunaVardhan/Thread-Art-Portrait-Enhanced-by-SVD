@@ -1,0 +1,206 @@
+clc;clear all;
+
+orgimage = imread("sample.jpeg");
+
+
+%% denoising the input image using SVD
+
+% Read the noisy image
+noisyImage = orgimage;
+
+% Convert the image to grayscale if it is in RGB format
+if size(noisyImage, 3) == 3
+    noisyImage = rgb2gray(noisyImage);
+end
+
+% Perform Singular Value Decomposition (SVD) on the noisy image matrix
+[U, S, V] = svd(double(noisyImage));
+
+% Specify the number of singular values to keep for denoising
+numSingularValues = 100; % Adjust this parameter as per your requirement
+
+% Set the singular values beyond the specified threshold to zero
+S(numSingularValues+1:end, numSingularValues+1:end) = 0;
+
+% Reconstruct the denoised image using the modified singular values
+denoisedImage = U * S * V';
+
+% Convert the denoised image to uint8 format (8-bit) and rescale the values
+denoisedImage = uint8(255 * mat2gray(denoisedImage));
+
+% Display the denoised image
+imshow(denoisedImage);
+title('Denoised Image');
+
+%% sharpening the de-noised image using SVD
+
+% Read the image
+blurImage = denoisedImage;
+
+
+% Perform Singular Value Decomposition (SVD) on the image matrix
+[U, S, V] = svd(double(blurImage));
+
+% Specify the percentage of singular values to retain
+sharpnessFactor = 1.2;
+
+% Compute the number of singular values to keep
+numSingularValues = round(sharpnessFactor * min(size(blurImage)));
+
+% Set the singular values beyond the specified threshold to zero
+S(numSingularValues+1:end, numSingularValues+1:end) = 0;
+
+% Reconstruct the image using the modified singular values
+sharpImage = U * S * V';
+
+% Convert the sharp image to uint8 format (8-bit) and rescale the values
+sharpImage = uint8(255 * mat2gray(sharpImage));
+
+% Display the sharp image
+imshow(sharpImage);
+title('Sharp Image');
+
+%% edge detection enhanced by SVD
+
+% Load the image
+image = sharpImage;
+
+
+% Perform SVD on the grayscale image
+[U, S, V] = svd(double(image));
+
+% Set the number of singular values to keep (adjust this as needed)
+numSingularValues = 200;
+
+% Reconstruct the image using the selected singular values
+reconstructedImage = U(:, 1:numSingularValues) * S(1:numSingularValues, 1:numSingularValues) * V(:, 1:numSingularValues)';
+
+% Apply edge detection on the reconstructed image
+edges = edge(reconstructedImage, 'log');
+
+% Display the detected edges
+imshow(edges);
+title('Detected Edges');
+
+%% blending edges with sharp image
+
+% Read the source and destination images
+sourceImage = sharpImage;
+destinationImage = edges;
+
+% Convert the images to double precision for calculations
+sourceImage = im2double(sourceImage);
+destinationImage = im2double(destinationImage);
+
+% Compute the size of the images
+[height, width, ~] = size(sourceImage);
+
+% Perform Fourier Transform on the images
+sourceImageF = fft2(sourceImage);
+destinationImageF = fft2(destinationImage);
+
+% Define the blending mask
+maskWidth = 200;  % Width of the blending region
+mask = zeros(height, width);
+mask(:, 1:maskWidth) = 1;
+
+% Perform image blending in the frequency domain
+blendedImageF = sourceImageF .* mask + destinationImageF .* (1 - mask);
+
+% Compute the inverse Fourier Transform to obtain the blended image
+blendedImage = real(ifft2(blendedImageF));
+
+% Display the blended image
+imshow(blendedImage);
+
+%% darkest line removed by water marking in SVD
+
+im = blendedImage; % Input image
+num_hooks = 270;    % Number of hooks around the circle
+num_chords = 1000;  % Number of chords used in the weave
+min_distance = 20;  % Minimum distance between each pair of hooks (pixels)
+
+s = size(im);
+whiteBG=ones(s);
+if s(1) ~= s(2) % Make image square if not
+    im = im(1:min(s),1:min(s));
+    s = size(im);
+end
+
+imagesc(im), colormap gray, axis equal;
+hold on
+
+% Invert image so that dark pixels are scored highest
+im = ones(s) - im;
+imshow(im)
+
+% Compute hook positions around a circle
+angle = linspace(0, 2*pi, num_hooks);
+rad = (s(1) - 1) / 2;
+hook_pos = rad * [cos(angle); sin(angle)] + repmat(s'/2, 1, num_hooks);
+plot(hook_pos(1,:), hook_pos(2,:), '.r')
+
+min_dist_sq = min_distance * min_distance;
+hook = ones(1,num_chords);
+
+% Pre-compute pixels between each pair of hooks
+disp('Pre-computing chord pixels');
+chord_pixels = cell(num_hooks);
+for h1 = 1 : num_hooks
+    for h2 = h1+1 : num_hooks
+        dif = hook_pos(:,h1) - hook_pos(:,h2);
+        
+        % Ignore hook pairs that are close together
+        if dif'*dif > min_dist_sq
+            % Compute pixels that lie along chord between hook pair
+            max_dim = round(max(abs(dif)));
+            x = round(linspace(hook_pos(1,h1), hook_pos(1,h2), max_dim));
+            y = round(linspace(hook_pos(2,h1), hook_pos(2,h2), max_dim));
+            chord_pixels{h1,h2} = uint32(sub2ind(s,y,x));
+        end
+    end
+end
+
+figure, hold on
+set(gca, 'YDir', 'reverse');
+title('Weave 0% complete');
+axis equal
+i_prev = 1;
+
+% Loop over chords
+for i = 1 : num_chords - 1
+
+    best_score = -1000000;
+    best_hook = 1;
+    
+    % Loop over possible hooks
+    for hook_new = 1 : num_hooks   
+        % Sort hook pair into ascending order for pixels lookup
+        h = sort([hook(i) hook_new]);
+        
+        if ~isempty(chord_pixels{h(1),h(2)})
+            % Compute score based on mean pixel values along chord
+            score = mean(im(chord_pixels{h(1),h(2)}));
+            
+            if score > best_score
+                best_score = score;
+                best_hook = hook_new;
+            end
+        end
+    end
+    
+    % Reduce pixel values along best chord
+    h = sort([hook(i) best_hook]);
+    ind = chord_pixels{h(1),h(2)};
+    [U,S,V ]=svd(whiteBG);
+    alpha=2;
+    Sn=S+alpha*im(ind);
+    RE=U*Sn*V';
+    
+    % Clear list for this pair to prevent re-use
+    chord_pixels{h(1),h(2)} = [];
+    
+    % Store as next hook
+    hook(i+1) = best_hook;
+ 
+end
